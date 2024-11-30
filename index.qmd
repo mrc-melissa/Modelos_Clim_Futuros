@@ -1,0 +1,349 @@
+---
+title: "Modelos climatológicos"
+author: "Melissa"
+format: html
+---
+
+# Modelos Climatológicos Futuros
+
+\![\]https://encrypted-tbn2.gstatic.com/images?q=tbn:ANd9GcRRJQpmZo6Gq9Va5lk4Ztf9pb8FDpyCKrlCGHRCMaYk35m9Ddu5mb4ct80BobonIF6SoLSIV6U01W28fhop1TLiMQ
+
+## Cargando datos de especie
+
+```{r}
+
+#| label: Definir_Especie
+#| warning: false
+#| message: false
+
+especie <- "Myrmecophaga tridactyla"
+
+# Desplazamiento (offset) para delimitar el área de estudio
+desplazamiento = 5
+
+# Resolución espacial de los datos climáticos
+resolucion = 10
+
+# SSP
+ssp <- "585"    # se puede cambiar por el escenario "126"
+
+# GCM
+gcm <- "HadGEM3-GC31-LL"
+
+# Proporción de datos de entreamiento a utilizar en el modelo
+proporcion_entrenamiento = 0.7
+```
+
+## Carga de paquetes
+
+```{r}
+ #| label: Colección de paquetes de Tidyverse
+ 
+library(tidyverse)
+
+# Estilos para ggplot2
+library(ggthemes)
+
+# Paletas de colores de RColorBrewer
+library(RColorBrewer)
+
+# Paletas de colores de viridis
+library(viridisLite)
+
+# Gráficos interactivos
+library(plotly)
+
+# Manejo de datos vectoriales
+library(sf)
+
+# Manejo de datos raster
+library(terra)
+
+# Manejo de datos raster
+library(raster)
+
+# Mapas interactivos
+library(leaflet)
+
+# Acceso a datos en GBIF
+library(rgbif)
+
+# Acceso a datos climáticos
+library(geodata)
+
+# Modelado de distribución de especies
+library(dismo)
+
+# Aceso a Java para Maxent
+library(rJava)
+```
+
+# Obtener datos presencia
+
+## Consulta los datos del API de GBIF
+
+```{r}
+#| label: Consulta_API_GBIF
+respuesta <- occ_search(
+  scientificName = especie, 
+  hasCoordinate = TRUE,
+  hasGeospatialIssue = FALSE,
+  limit = 10000
+)
+
+# Extraer datos de presencia
+presencia <- respuesta$data
+```
+
+##Guardar los datos de presencia en un archivo CSV
+
+```{r}
+#| label: Guarda_datos
+# Guardar los datos de presencia en un archivo CSV
+write_csv(presencia, 'presencia.csv')
+```
+
+## Leer en un dataframe los datos de presencia de un archivo CSV
+
+```{r}
+#| label: Leer_datos
+#| Warning: false 
+#| message: false
+
+presencia <- read_csv('presencia.csv')
+
+# Crear un objeto sf a partir del dataframe
+presencia <- st_as_sf(
+  presencia,
+  coords = c("decimalLongitude", "decimalLatitude"),
+  remove = FALSE, # conservar las columnas de las coordenadas
+  crs = 4326
+)
+```
+
+# Delimitar la extensión del área de estudio
+
+```{r}
+#| label: Set_extensions
+#| Warning: false 
+#| message: false
+# Delimitar la extensión del área de estudio
+area_estudio <- ext(
+  min(presencia$decimalLongitude) - desplazamiento, 
+  max(presencia$decimalLongitude) + desplazamiento,
+  min(presencia$decimalLatitude) - desplazamiento, 
+  max(presencia$decimalLatitude) + desplazamiento
+)
+```
+
+# Obtener datos climáticos actuales
+
+```{r}
+#| label: Crop_Datos_clima
+#| Warning: false 
+#| message: false
+
+clima_actual <- worldclim_global(
+  var = 'bio', 
+  res = resolucion, 
+  path = tempdir()
+)
+
+# Recortar los datos climáticos para el área de estudio
+clima_actual <- crop(clima_actual, area_estudio)
+
+# Desplegar nombres de las variables climáticas
+names(clima_actual)
+```
+
+# Obtener datos climáticos para escenario futuro
+
+```{r}
+#| label: Crop_Datos_climaFuturo
+#| Warning: false 
+#| message: false
+
+# Obtener datos climáticos para escenario futuro
+clima_futuro <- cmip6_world(
+  var = "bioc",
+  res = resolucion,
+  ssp = ssp,
+  model = gcm,
+  time = "2041-2060",
+  path = tempdir()
+)
+
+# Recortar los datos climáticos para el área de estudio
+clima_futuro <- crop(clima_futuro, area_estudio)
+
+# Desplegar nombres de las variables
+names(clima_futuro)
+```
+
+# Crear dataframe con columnas de longitud y latitud
+
+```{r}
+#| label: df_lat_long
+#| Warning: false 
+#| message: false
+
+# Crear dataframe con columnas de longitud y latitud
+coordenadas_presencia <- data.frame(
+  decimalLongitude = presencia$decimalLongitude,
+  decimalLatitude = presencia$decimalLatitude
+)
+
+# Eliminar coordenadas duplicadas
+coordenadas_presencia <- unique(coordenadas_presencia)
+```
+
+# Establecer una "semilla" para garantizar que la selección aleatoria sea reproducible
+
+```{r}
+
+#| label: datos_aleatorios
+#| Warning: false 
+#| message: false
+
+# Establecer una "semilla" para garantizar que la selección aleatoria sea reproducible
+set.seed(123)
+
+# Cantidad de registros de presencia
+n_presencia <- nrow(coordenadas_presencia)
+
+# Con sample(), se selecciona aleatoriamente una proporción (ej. 0.7) 
+# de los índices de los datos de presencia para el conjunto de entrenamiento
+indices_entrenamiento <- sample(
+  1:n_presencia, 
+  size = round(proporcion_entrenamiento * n_presencia)
+)
+
+# Crear el subconjunto de entrenamiento utilizando los índices seleccionados
+entrenamiento <- coordenadas_presencia[indices_entrenamiento, ]
+
+# Crear el subconjunto de evaluación con los datos restantes
+evaluacion <- coordenadas_presencia[-indices_entrenamiento, ]
+```
+
+# Transformación de datos raster y modelización clima futuro
+
+```{r}
+
+#| label: Modelo_actual_futuro
+#| Warning: false 
+#| message: false
+
+# transformacion_datosRaster
+clima_actual <- raster::stack(clima_actual)
+
+# Generar el modelo
+modelo_actual <- maxent(x = clima_actual, p = entrenamiento)
+
+# Aplicar el modelo entrenado al clima actual
+prediccion_actual <- predict(modelo_actual, clima_actual)
+
+# Convertir variables climáticas futuras al formato raster stack
+clima_futuro_raster <- raster::stack(clima_futuro)
+
+# Asegurar que las variables tengan los mismos nombres y orden
+names(clima_futuro_raster) <- names(clima_actual)
+
+# Proyectar el modelo al clima futuro
+prediccion_futuro <- predict(modelo_actual, clima_futuro_raster)
+```
+
+# Calcular la diferencia entre el clima presente y futuro
+
+```{r}
+#| label: diferencia_presente_futuro
+diferencia <- prediccion_futuro - prediccion_actual
+```
+
+# Crear mapa de las diferencias presente y futuro
+
+```{r}
+#| label: Mapa
+
+# Paleta de colores del modelo con clima actual
+colores_modelo_actual <- colorNumeric(
+  palette = c("white", "black"),
+  values(prediccion_actual),
+  na.color = "transparent"
+)
+
+# Paleta de colores del modelo con clima futuro
+colores_modelo_futuro <- colorNumeric(
+  palette = c("white", "black"),
+  values(prediccion_futuro),
+  na.color = "transparent"
+)
+
+# Crear paleta de colores para la diferencia
+paleta_diferencia <- colorNumeric(
+  palette = c("red", "white", "blue"),
+  domain = c(min(values(diferencia), na.rm = TRUE), max(values(diferencia), na.rm = TRUE)),
+  na.color = "transparent"
+)
+
+# Mapa de la diferencia
+leaflet() |>
+  addTiles(group = "Mapa general") |>
+  addProviderTiles(
+    providers$Esri.WorldImagery, 
+    group = "Imágenes satelitales"
+  ) |>  
+  addProviderTiles(
+    providers$CartoDB.Positron, 
+    group = "Mapa blanco"
+  ) |>
+  addRasterImage(
+    prediccion_actual,
+    colors = colores_modelo_actual,
+    opacity = 0.6,
+    group = "Modelo con clima actual",
+  ) |>
+  addRasterImage(
+    prediccion_futuro,
+    colors = colores_modelo_futuro,
+    opacity = 0.6,
+    group = "Modelo con clima futuro",
+  ) |>  
+  addRasterImage(
+    diferencia,
+    colors = paleta_diferencia,
+    opacity = 0.6,
+    group = "Diferencia",
+  ) |>  
+  addLegend(
+    title = "Modelo con clima actual",
+    values = values(prediccion_actual),
+    pal = colores_modelo_actual,
+    position = "bottomright",
+    group = "Modelo con clima actual"
+  ) |>    
+  addLegend(
+    title = "Modelo con clima futuro",
+    values = values(prediccion_futuro),
+    pal = colores_modelo_futuro,
+    position = "bottomright",
+    group = "Modelo con clima futuro"
+  ) |>     
+  addLegend(
+    title = "Diferencia",
+    values = values(diferencia),
+    pal = paleta_diferencia,
+    position = "bottomleft",
+    group = "Diferencia"
+  ) |>  
+  addLayersControl(
+    # control de capas
+    baseGroups = c("Mapa general", "Imágenes satelitales", "Mapa blanco"),
+    overlayGroups = c(
+      "Modelo con clima actual",
+      "Modelo con clima futuro",
+      "Diferencia"
+    )
+  ) |>
+  hideGroup("Modelo con clima actual") |>
+  hideGroup("Modelo con clima futuro")
+```
